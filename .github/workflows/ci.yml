@@ -44,7 +44,8 @@ jobs:
 
       - name: Build and push Docker image
         run: |
-              echo ${{ secrets.TOKEN }} | docker login registry.digitalocean.com -u hilton.lam@asiaalliedgroup.com --password-stdin
+              echo ${{ secrets.TOKEN }} | docker login registry.digitalocean.com \
+              -u "${{ vars.DO_DOCR_LOGIN_EMAIL }}" --password-stdin
               docker build --tag ${{ env.IMAGE }} --file Dockerfile-Self .
               docker push ${{ env.IMAGE }}
 
@@ -55,6 +56,8 @@ jobs:
           username: ${{ vars.REMOTE_USER }}
           key: ${{ secrets.REMOTE_SSH_KEY }}
           script: |
+              echo ${{ secrets.TOKEN }} | docker login registry.digitalocean.com \
+              -u "${{ vars.DO_DOCR_LOGIN_EMAIL }}" --password-stdin
               docker pull ${{ env.IMAGE }}
               if [ "$(docker ps -a --format '{{.Names}}' | grep -c ${{ env.NAME }})" -gt 0 ]; then 
                 docker rm -f ${{ env.NAME }}

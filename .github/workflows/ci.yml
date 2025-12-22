@@ -42,11 +42,32 @@ jobs:
             cp ./env/${{ env.PUSHREF }}.env .env.production
             yarn build
 
+            
+      - name: Setup AWS ECR Details (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-ECR-Push
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to AWS ECR
+        id: login-pf-aws-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+
       - name: Build and push Docker image
         run: |
               echo ${{ secrets.TOKEN }} | docker login registry.digitalocean.com -u hilton.lam@asiaalliedgroup.com --password-stdin
               docker build --tag ${{ env.IMAGE }} --file Dockerfile-Self .
               docker push ${{ env.IMAGE }}
+
+      - name: Get ECR login token
+        id: ecr-login-token
+        run: |
+          ECR_TOKEN=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
+          echo "token<<EOF" >> $GITHUB_OUTPUT
+          echo "$ECR_TOKEN" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: SSH and Run Docker image
         uses: appleboy/ssh-action@v1.2.0

@@ -48,7 +48,7 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           role-session-name: GitHubActions-ECR-Push
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Login to AWS ECR
         id: login-pf-aws-ecr
@@ -65,7 +65,7 @@ jobs:
       - name: Get ECR login token
         id: ecr-login-token
         run: |
-          ECR_TOKEN=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
+          ECR_TOKEN=$(aws ecr get-login-password --region ${{ vars.AWS_REGION }})
           echo "token<<EOF" >> $GITHUB_OUTPUT
           echo "$ECR_TOKEN" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT

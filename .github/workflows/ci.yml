@@ -122,6 +122,54 @@ jobs:
         #       docker image prune --force
         #       docker container prune --force
               
+      - name: Prune old semver Docker images
+        if: success()
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          ECR_REGISTRY: ${{ steps.login-pf-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ env.BRANCH }}
+          ACTIVE: ${{ env.ACTIVE }}
+        with:
+          host: ${{ env.REMOTE_HOST }}
+          username: ${{ vars.REMOTE_USER }}
+          key: ${{ secrets.REMOTE_SSH_KEY }}
+          envs: ECR_REGISTRY,ECR_REPOSITORY,IMAGE_TAG,ACTIVE
+          script: |
+            IMAGE_PREFIX="${ECR_REGISTRY}/${ECR_REPOSITORY}/${ACTIVE}"
+            CURRENT="${IMAGE_TAG}"
+
+            if ! echo "$CURRENT" | grep -qE '^[vV][0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Skip prune: IMAGE_TAG '${CURRENT}' is not semver"
+              exit 0
+            fi
+
+            mapfile -t TAGS < <(
+              docker images --format '{{.Repository}}:{{.Tag}}' \
+                | grep "^${IMAGE_PREFIX}:" \
+                | sed "s|^${IMAGE_PREFIX}:||" \
+                | grep -E '^[vV][0-9]+\.[0-9]+\.[0-9]+$' \
+                | sort -V
+            )
+
+            PREV=$(printf '%s\n' "${TAGS[@]}" | sort -V | awk -v cur="$CURRENT" '
+              { a[++n]=$0 }
+              END { for(i=1;i<=n;i++) if(a[i]==cur && i>1) { print a[i-1]; exit } }'))
+
+            if [ -n "$PREV" ]; then
+              echo "Keep: ${CURRENT}, ${PREV}"
+            else
+              echo "Keep: ${CURRENT} only (no previous version)"
+            fi
+
+            for tag in "${TAGS[@]}"; do
+              [ "$tag" = "$CURRENT" ] && continue
+              [ -n "$PREV" ] && [ "$tag" = "$PREV" ] && continue
+              echo "Removing ${IMAGE_PREFIX}:${tag}"
+              docker rmi "${IMAGE_PREFIX}:${tag}" 2>/dev/null || true
+            done
+
   notify-teams:
     if: always()
     needs: [ action_trigger ]

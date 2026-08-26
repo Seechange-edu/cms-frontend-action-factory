@@ -147,7 +147,9 @@ jobs:
               docker rm -f ${{ env.NAME }}
             fi
             docker run --name ${{ env.NAME }} -d -p ${{ env.OUT_PORT }}:${{ env.PORT }} --restart unless-stopped ${IMAGE_URI}
-            docker image prune --force
+            # Image pruning moved to the prune-images job, which never fails the
+            # run: a prune already running on the host would fail this script and
+            # mark a deploy that actually succeeded as red.
             # docker container prune --force
         env:
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
@@ -161,7 +163,22 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
+      # Its own step, and its own continue-on-error: a prune already running on
+      # the host fails this one, and a failed step would otherwise skip the
+      # sweep below along with it.
+      - name: Prune dangling Docker images
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ needs.action_trigger.outputs.remote_host }}
+          username: ${{ vars.REMOTE_USER }}
+          key: ${{ secrets.REMOTE_SSH_KEY }}
+          # A mutable tag such as :dev takes its name off the previous image on
+          # every pull, leaving layers the sweep below never looks at.
+          script: docker image prune --force
+
       - name: Prune old semver Docker images
+        continue-on-error: true
         uses: appleboy/ssh-action@v1.2.0
         env:
           ECR_REGISTRY: ${{ needs.action_trigger.outputs.ecr_registry }}

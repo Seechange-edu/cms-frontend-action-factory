@@ -156,6 +156,78 @@ jobs:
           ECR_TOKEN: ${{ steps.ecr-login-token.outputs.token }}
           IMAGE_URI: ${{ env.IMAGE_URI }}
 
+  # User-facing notes for a prod release that just deployed, written into
+  # the source repository's (private) release, below the GitHub notes. Only
+  # when that release asked for them (release-meta `changelog`); otherwise
+  # repo-toolkit reads it and stops in seconds. Never fails the run.
+  #
+  # 🔴 This repository is PUBLIC: its logs, job summaries and artifacts are
+  # readable by anyone. `quiet` keeps the notes and error details out of
+  # them, and nothing in this job may echo the private source.
+  changelog:
+    needs: [action_trigger]
+    # Prod only: a release tag (v3.13.13, v3.12.2-a), not a branch deploy.
+    if: needs.action_trigger.result == 'success' && startsWith(needs.action_trigger.outputs.image_tag, 'v')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the source repository with its history
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.action_trigger.outputs.source_repo }}
+          ref: ${{ needs.action_trigger.outputs.image_tag }}
+          token: ${{ secrets.ACTION_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # repo-toolkit is private, and a public repository cannot `uses:` a
+      # private action; checked out, it runs as a local one.
+      - name: Checkout repo-toolkit
+        uses: actions/checkout@v4
+        with:
+          repository: Seechange-edu/repo-toolkit
+          token: ${{ secrets.ACTION_TOKEN }}
+          path: .repo-toolkit
+          persist-credentials: false
+
+      - name: Write the release notes
+        id: notes
+        uses: ./.repo-toolkit
+        with:
+          mode: changelog
+          tag: ${{ needs.action_trigger.outputs.image_tag }}
+          openaiKey: ${{ secrets.OPENAI_API_KEY }}
+          model: ${{ vars.CHANGELOG_MODEL }}
+          summaryModel: ${{ vars.CHANGELOG_SUMMARY_MODEL }}
+          quiet: 'true'
+          dryRun: 'false'
+          token: ${{ secrets.ACTION_TOKEN }}
+
+      - name: Tell Teams the notes are ready for review
+        if: fromJSON(steps.notes.outputs.result).branches[0].reason == 'documented'
+        continue-on-error: true
+        env:
+          WEBHOOK: ${{ needs.action_trigger.outputs.teams_webhook }}
+          TAG: ${{ needs.action_trigger.outputs.image_tag }}
+          SOURCE_REPO: ${{ needs.action_trigger.outputs.source_repo }}
+          URL: ${{ fromJSON(steps.notes.outputs.result).branches[0].url }}
+        run: |
+          set -euo pipefail
+          [ -n "$WEBHOOK" ] || exit 0
+          jq -n \
+            --arg title "📝 ${TAG}: user changelog drafted" \
+            --arg subtitle "${SOURCE_REPO}" \
+            --arg next "AI draft, written below the GitHub notes. Review it before sharing it with users." \
+            --arg url "$URL" \
+            '{type: "message", attachments: [{contentType: "application/vnd.microsoft.card.adaptive", content: {
+              "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", type: "AdaptiveCard", version: "1.4",
+              body: [{type: "TextBlock", size: "Medium", weight: "Bolder", wrap: true, text: $title},
+                     {type: "TextBlock", spacing: "None", isSubtle: true, wrap: true, text: $subtitle},
+                     {type: "TextBlock", spacing: "Medium", wrap: true, text: $next}],
+              actions: [{type: "Action.OpenUrl", title: "Open release", url: $url}]}}]}' \
+            | curl -fsS -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK" >/dev/null \
+            || echo "::warning::Could not post to Teams."
+
   # Housekeeping only: never fails the run.
   prune-images:
     needs: [action_trigger]

@@ -159,7 +159,8 @@ jobs:
   # User-facing notes for a prod release that just deployed, written into
   # the source repository's (private) release, below the GitHub notes. Only
   # when that release asked for them (release-meta `changelog`); otherwise
-  # repo-toolkit reads it and stops in seconds. Never fails the run.
+  # repo-toolkit reads it and stops in seconds. Never fails the run. The
+  # OpenAI key, models and api-meter settings come from AWS SSM.
   #
   # 🔴 This repository is PUBLIC: its logs, job summaries and artifacts are
   # readable by anyone. `quiet` keeps the notes and error details out of
@@ -170,6 +171,9 @@ jobs:
     if: needs.action_trigger.result == 'success' && startsWith(needs.action_trigger.outputs.image_tag, 'v')
     continue-on-error: true
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC sign-in to AWS, for the SSM settings
+      contents: read
     steps:
       - name: Checkout the source repository with its history
         uses: actions/checkout@v4
@@ -190,15 +194,62 @@ jobs:
           path: .repo-toolkit
           persist-credentials: false
 
+      - name: Sign in to AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-Changelog
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # The SSM parameters think-and-speak-backend and AI-Tutor-Backend already
+      # map (ssm-secret-mapping.properties), plus the two changelog models.
+      # Every secret is masked before it is written anywhere: this log is public.
+      - name: Read the changelog settings from SSM
+        run: |
+          set -euo pipefail
+          param() {
+            aws ssm get-parameter --name "$1" --with-decryption \
+              --query Parameter.Value --output text 2>/dev/null || true
+          }
+          OPENAI_KEY=$(param /ai-english-gym/dev/OPENAI_API_KEY)
+          if [ -z "$OPENAI_KEY" ]; then
+            echo "::error::Could not read /ai-english-gym/dev/OPENAI_API_KEY from SSM."
+            exit 1
+          fi
+          echo "::add-mask::$OPENAI_KEY"
+          # api-meter: application by ingest key, service and feature set by
+          # repo-toolkit. Off the same way it is for the backends.
+          METER_URL=""
+          METER_KEYS=""
+          if [ "$(param /api-meter/prod/GLOBAL_ENABLED)" != false ]; then
+            METER_URL=$(param /api-meter/prod/PROXY_URL_PROD)
+            for PAIR in "ai-english-gym|INGEST_KEY_AI_ENGLISH_GYM" "cms|INGEST_KEY_CMS"; do
+              IFS='|' read -r APP NAME <<< "$PAIR"
+              KEY=$(param "/api-meter/prod/${NAME}")
+              [ -n "$KEY" ] || continue
+              echo "::add-mask::$KEY"
+              METER_KEYS="${METER_KEYS}${APP}=${KEY},"
+            done
+          fi
+          {
+            echo "CHANGELOG_OPENAI_KEY=$OPENAI_KEY"
+            echo "CHANGELOG_MODEL=$(param /global/prod/CHANGELOG_MODEL_OPENAI)"
+            echo "CHANGELOG_SUMMARY_MODEL=$(param /global/prod/CHANGELOG_SUMMARY_MODEL_OPENAI)"
+            echo "CHANGELOG_METER_URL=$METER_URL"
+            echo "CHANGELOG_METER_KEYS=$METER_KEYS"
+          } >> "$GITHUB_ENV"
+
       - name: Write the release notes
         id: notes
         uses: ./.repo-toolkit
         with:
           mode: changelog
           tag: ${{ needs.action_trigger.outputs.image_tag }}
-          openaiKey: ${{ secrets.OPENAI_API_KEY }}
-          model: ${{ vars.CHANGELOG_MODEL }}
-          summaryModel: ${{ vars.CHANGELOG_SUMMARY_MODEL }}
+          openaiKey: ${{ env.CHANGELOG_OPENAI_KEY }}
+          model: ${{ env.CHANGELOG_MODEL }}
+          summaryModel: ${{ env.CHANGELOG_SUMMARY_MODEL }}
+          meterBaseUrl: ${{ env.CHANGELOG_METER_URL }}
+          meterKeys: ${{ env.CHANGELOG_METER_KEYS }}
           quiet: 'true'
           dryRun: 'false'
           token: ${{ secrets.ACTION_TOKEN }}

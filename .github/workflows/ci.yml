@@ -180,7 +180,7 @@ jobs:
         with:
           repository: ${{ needs.action_trigger.outputs.source_repo }}
           ref: ${{ needs.action_trigger.outputs.image_tag }}
-          token: ${{ secrets.ACTION_TOKEN }}
+          token: ${{ secrets.ACCESS_TOKEN }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -190,7 +190,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Seechange-edu/repo-toolkit
-          token: ${{ secrets.ACTION_TOKEN }}
+          token: ${{ secrets.ACCESS_TOKEN }}
           path: .repo-toolkit
           persist-credentials: false
 
@@ -278,7 +278,7 @@ jobs:
           meterKeys: ${{ env.CHANGELOG_METER_KEYS }}
           quiet: 'true'
           dryRun: 'false'
-          token: ${{ secrets.ACTION_TOKEN }}
+          token: ${{ secrets.ACCESS_TOKEN }}
 
       - name: Tell Teams the notes are ready for review
         # The notes step is skipped when the settings could not be read, and

@@ -4,7 +4,8 @@ name: Changelog run
 # repo-toolkit, read the settings from SSM, write the notes into the release.
 # ci.yml calls it after a successful prod deploy (scope empty: the release-meta
 # decides); changelog.yml calls it on a request from the source repository
-# (scope forced). Only those two call it — it has no trigger of its own.
+# (scope forced). changelog-summary.yml calls the date-range mode.
+# It has no trigger of its own.
 #
 # 🔴 This repository is PUBLIC: its logs, job summaries and artifacts are
 # readable by anyone. `quiet` keeps the notes and error details out of them;
@@ -13,14 +14,44 @@ name: Changelog run
 on:
   workflow_call:
     inputs:
+      mode:
+        description: 'changelog or changelog-summary'
+        required: false
+        type: string
+        default: changelog
       source_repo:
         description: 'owner/name of the private source repository'
         required: true
         type: string
       tag:
         description: 'The deployed release to write notes for'
-        required: true
+        required: false
         type: string
+      start_date:
+        description: 'Summary first date, YYYY-MM-DD (UTC+8)'
+        required: false
+        type: string
+        default: ''
+      end_date:
+        description: 'Summary last date, inclusive, YYYY-MM-DD (UTC+8)'
+        required: false
+        type: string
+        default: ''
+      output_tag:
+        description: 'Main repository release for report downloads'
+        required: false
+        type: string
+        default: ''
+      summary_members:
+        description: 'Optional child keys: backend,aiTutor,cmsBackend'
+        required: false
+        type: string
+        default: ''
+      include_think_and_speak:
+        description: 'Include the Think & Speak / AI English Gym product line in CMS summaries'
+        required: false
+        type: boolean
+        default: false
       scope:
         description: 'single or joint, forcing a (re)write; empty: the release-meta decides'
         required: false
@@ -54,13 +85,24 @@ jobs:
     outputs:
       result: ${{ steps.notes.outputs.result }}
     steps:
+      - name: Validate the mode and release tag
+        env:
+          MODE: ${{ inputs.mode }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$MODE" in
+            changelog-summary) ;;
+            changelog) [[ "$TAG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo '::error::Invalid release tag.'; exit 1; } ;;
+            *) echo '::error::Unsupported changelog mode.'; exit 1 ;;
+          esac
+
       - name: Checkout the source repository with its history
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.source_repo }}
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.mode == 'changelog' && inputs.tag || '' }}
           token: ${{ secrets.ACCESS_TOKEN }}
-          fetch-depth: 0
+          fetch-depth: ${{ inputs.mode == 'changelog-summary' && '1' || '0' }}
           persist-credentials: false
 
       # repo-toolkit is private, and a public repository cannot `uses:` a
@@ -69,6 +111,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Seechange-edu/repo-toolkit
+          ref: main
           token: ${{ secrets.ACCESS_TOKEN }}
           path: .repo-toolkit
           persist-credentials: false
@@ -84,6 +127,8 @@ jobs:
       # map (ssm-secret-mapping.properties), plus the two changelog models.
       # Every secret is masked before it is written anywhere: this log is public.
       - name: Read the changelog settings from SSM
+        env:
+          MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           # A parameter not read reads as empty, with a warning that gives only
@@ -131,27 +176,36 @@ jobs:
           else
             echo "api-meter: on, ingest keys for:${METER_APPS:- none}"
           fi
-          # The two models are not secrets, so say what was read: an unread one
-          # falls back to the default model.
+          # Summary mode accepts configured models only, with no built-in default.
           MODEL=$(param /global/prod/CHANGELOG_MODEL_OPENAI)
           SUMMARY_MODEL=$(param /global/prod/CHANGELOG_SUMMARY_MODEL_OPENAI)
-          echo "Changelog models from SSM: read='${MODEL:-<not set: gpt-5.4-mini>}' merge='${SUMMARY_MODEL:-<not set: same as read>}'"
+          if [ "$MODE" = changelog-summary ]; then
+            echo "Changelog summary model from SSM: '${SUMMARY_MODEL:-${MODEL:-<not set: required when there are entries>}}'"
+          else
+            echo "Changelog models from SSM: read='${MODEL:-<not set: gpt-5.4-mini>}' merge='${SUMMARY_MODEL:-<not set: same as read>}'"
+          fi
           {
             echo "CHANGELOG_OPENAI_KEY=$OPENAI_KEY"
             echo "CHANGELOG_MODEL=$MODEL"
             echo "CHANGELOG_SUMMARY_MODEL=$SUMMARY_MODEL"
             echo "CHANGELOG_METER_URL=$METER_URL"
             echo "CHANGELOG_METER_KEYS=$METER_KEYS"
+            echo "CHANGELOG_TOOLKIT_SHA=$(git -C .repo-toolkit rev-parse HEAD)"
           } >> "$GITHUB_ENV"
 
       - name: Write the release notes
         id: notes
         uses: ./.repo-toolkit
         with:
-          mode: changelog
+          mode: ${{ inputs.mode }}
           tag: ${{ inputs.tag }}
           scope: ${{ inputs.scope }}
           previous: ${{ inputs.previous }}
+          startDate: ${{ inputs.start_date }}
+          endDate: ${{ inputs.end_date }}
+          outputTag: ${{ inputs.output_tag }}
+          summaryMembers: ${{ inputs.summary_members }}
+          includeThinkAndSpeak: ${{ inputs.include_think_and_speak }}
           openaiKey: ${{ env.CHANGELOG_OPENAI_KEY }}
           model: ${{ env.CHANGELOG_MODEL }}
           summaryModel: ${{ env.CHANGELOG_SUMMARY_MODEL }}

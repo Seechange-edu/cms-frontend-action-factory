@@ -92,6 +92,9 @@ jobs:
           cache: yarn
 
       - name: Build Yarn
+        env:
+          # next build holds ~2GB of live heap. Node's default cap is ~2GB and the compile OOMs on it.
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
             yarn --frozen-lockfile
             echo ${{ env.PUSHREF }}

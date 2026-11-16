@@ -95,6 +95,8 @@ jobs:
         env:
           # next build holds ~2GB of live heap. Node's default cap is ~2GB and the compile OOMs on it.
           NODE_OPTIONS: --max-old-space-size=4096
+          # postinstall runs `playwright install`. This deploy job does not run those tests.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
         run: |
             yarn --frozen-lockfile
             echo ${{ env.PUSHREF }}

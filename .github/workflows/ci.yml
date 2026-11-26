@@ -10,9 +10,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  action_trigger:
+  deploy_target:
     if:  startsWith(github.ref, 'refs/tags/cms-frontend/')
     runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      platform: ${{ steps.platform.outputs.platform }}
+      runner: ${{ steps.platform.outputs.runner }}
+    steps:
+      - name: Resolve deployment platform
+        id: platform
+        run: |
+          platform=$(jq -er '.release.body | fromjson | if .targetPlatform == null then "linux/amd64" else .targetPlatform end' "$GITHUB_EVENT_PATH")
+          case "$platform" in
+            linux/amd64) runner=ubuntu-latest ;;
+            linux/arm64) runner=ubuntu-24.04-arm ;;
+            *) echo "::error::Unsupported targetPlatform in release payload"; exit 1 ;;
+          esac
+          printf 'platform=%s\nrunner=%s\n' "$platform" "$runner" >> "$GITHUB_OUTPUT"
+
+  action_trigger:
+    needs: deploy_target
+    runs-on: ${{ needs.deploy_target.outputs.runner }}
     permissions:
       id-token: write   # Required for OIDC authentication with AWS
       contents: read    # Required for actions/checkout
@@ -118,13 +137,14 @@ jobs:
 
       - name: Build and push Docker image
         env:
+          TARGET_PLATFORM: ${{ needs.deploy_target.outputs.platform }}
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.AWS_ECR_REPOSITORY }}
           IMAGE_TAG: ${{ env.BRANCH }}
         run: |
           IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/${{ env.ACTIVE }}:${IMAGE_TAG}"
           echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_ENV
-          docker build --tag ${IMAGE_URI} --file Dockerfile-Self .
+          docker build --platform "$TARGET_PLATFORM" --tag "${IMAGE_URI}" --file Dockerfile-Self .
           docker push ${IMAGE_URI}
 
       - name: Get ECR login token
@@ -141,12 +161,27 @@ jobs:
           host: ${{ env.REMOTE_HOST }}
           username: ${{ vars.REMOTE_USER }}
           key: ${{ secrets.REMOTE_SSH_KEY }}
-          envs: ECR_REGISTRY,ECR_TOKEN,IMAGE_URI
+          envs: ECR_REGISTRY,ECR_TOKEN,IMAGE_URI,TARGET_PLATFORM
           script: |
             # Login to AWS ECR using temporary token from GitHub Actions
             echo ${ECR_TOKEN} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
+            host_platform=$(docker info --format '{{.OSType}}/{{.Architecture}}') || exit 1
+            case "$host_platform" in
+              linux/x86_64) host_platform=linux/amd64 ;;
+              linux/aarch64) host_platform=linux/arm64 ;;
+            esac
+            if [ "$host_platform" != "$TARGET_PLATFORM" ]; then
+              echo "Deployment aborted: Docker host is $host_platform, expected $TARGET_PLATFORM" >&2
+              exit 1
+            fi
+
             docker pull "${IMAGE_URI}" || exit 1
+            image_platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${IMAGE_URI}") || exit 1
+            if [ "$image_platform" != "$TARGET_PLATFORM" ]; then
+              echo "Deployment aborted: image is $image_platform, expected $TARGET_PLATFORM" >&2
+              exit 1
+            fi
             if [ "$(docker ps -a --format '{{.Names}}' | grep -c ${{ env.PREV_NAME }})" -gt 0 ]; then
               docker rm -f ${{ env.PREV_NAME }}
             fi
@@ -159,6 +194,7 @@ jobs:
             # mark a deploy that actually succeeded as red.
             # docker container prune --force
         env:
+          TARGET_PLATFORM: ${{ needs.deploy_target.outputs.platform }}
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
           ECR_TOKEN: ${{ steps.ecr-login-token.outputs.token }}
           IMAGE_URI: ${{ env.IMAGE_URI }}

@@ -146,7 +146,7 @@ jobs:
             # Login to AWS ECR using temporary token from GitHub Actions
             echo ${ECR_TOKEN} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-            docker pull ${IMAGE_URI}
+            docker pull "${IMAGE_URI}" || exit 1
             if [ "$(docker ps -a --format '{{.Names}}' | grep -c ${{ env.PREV_NAME }})" -gt 0 ]; then
               docker rm -f ${{ env.PREV_NAME }}
             fi

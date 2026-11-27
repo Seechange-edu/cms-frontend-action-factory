@@ -17,17 +17,41 @@ jobs:
     outputs:
       platform: ${{ steps.platform.outputs.platform }}
       runner: ${{ steps.platform.outputs.runner }}
+      mode: ${{ steps.platform.outputs.mode }}
+      smoke_host: ${{ steps.platform.outputs.smoke_host }}
     steps:
       - name: Resolve deployment platform
         id: platform
         run: |
-          platform=$(jq -er '.release.body | fromjson | if .targetPlatform == null then "linux/amd64" else .targetPlatform end' "$GITHUB_EVENT_PATH")
+          payload=$(jq -er '.release.body | fromjson | objects' "$GITHUB_EVENT_PATH")
+          platform=$(jq -er 'if .targetPlatform == null then "linux/amd64" else .targetPlatform end' <<< "$payload")
+          mode=$(jq -er 'if .deploymentMode == null then "standard" else .deploymentMode end' <<< "$payload")
+          tag=$(jq -er '.branch | strings' <<< "$payload")
           case "$platform" in
             linux/amd64) runner=ubuntu-latest ;;
             linux/arm64) runner=ubuntu-24.04-arm ;;
             *) echo "::error::Unsupported targetPlatform in release payload"; exit 1 ;;
           esac
-          printf 'platform=%s\nrunner=%s\n' "$platform" "$runner" >> "$GITHUB_OUTPUT"
+          case "$mode:$tag" in
+            arm64-smoke:*-arm64)
+              if [ "$platform" != linux/arm64 ]; then
+                echo "::error::ARM64 smoke requires an ARM64 target"
+                exit 1
+              fi
+              smoke_host=$(jq -er '.remoteHost | strings | select(test("^[A-Za-z0-9][A-Za-z0-9.-]*$"))' <<< "$payload")
+              printf 'smoke_host=%s\n' "$smoke_host" >> "$GITHUB_OUTPUT"
+              ;;
+            standard:*-arm64)
+              echo "::error::ARM64 smoke tag is missing its deployment mode"
+              exit 1
+              ;;
+            standard:*) ;;
+            *)
+              echo "::error::Invalid deployment mode or ARM64 smoke tag"
+              exit 1
+              ;;
+          esac
+          printf 'platform=%s\nrunner=%s\nmode=%s\n' "$platform" "$runner" "$mode" >> "$GITHUB_OUTPUT"
 
   action_trigger:
     needs: deploy_target
@@ -43,6 +67,7 @@ jobs:
       teams_webhook: ${{ steps.deploy-vars.outputs.teams_webhook }}
       active: ${{ steps.deploy-vars.outputs.active }}
       image_tag: ${{ steps.deploy-vars.outputs.image_tag }}
+      deployment_mode: ${{ needs.deploy_target.outputs.mode }}
       ecr_registry: ${{ steps.login-pf-aws-ecr.outputs.registry }}
       source_repo: ${{ steps.relinfo.outputs.source_repo }}
       commit_sha: ${{ steps.relinfo.outputs.commit_sha }}
@@ -158,10 +183,10 @@ jobs:
       - name: SSH and Run Docker image
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ env.REMOTE_HOST }}
+          host: ${{ needs.deploy_target.outputs.mode == 'arm64-smoke' && needs.deploy_target.outputs.smoke_host || env.REMOTE_HOST }}
           username: ${{ vars.REMOTE_USER }}
           key: ${{ secrets.REMOTE_SSH_KEY }}
-          envs: ECR_REGISTRY,ECR_TOKEN,IMAGE_URI,TARGET_PLATFORM
+          envs: ECR_REGISTRY,ECR_TOKEN,IMAGE_URI,TARGET_PLATFORM,DEPLOYMENT_MODE
           script: |
             # Login to AWS ECR using temporary token from GitHub Actions
             echo ${ECR_TOKEN} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
@@ -182,6 +207,18 @@ jobs:
               echo "Deployment aborted: image is $image_platform, expected $TARGET_PLATFORM" >&2
               exit 1
             fi
+
+            if [ "$DEPLOYMENT_MODE" = arm64-smoke ]; then
+              smoke_name="${{ env.NAME }}-arm64-smoke"
+              if docker container inspect "$smoke_name" >/dev/null 2>&1; then
+                docker rm -f "$smoke_name" || exit 1
+              fi
+              # Keep the smoke endpoint private to the new host.
+              docker run --name "$smoke_name" -d \
+                -p "127.0.0.1:${{ env.OUT_PORT }}:${{ env.PORT }}" "${IMAGE_URI}"
+              exit $?
+            fi
+
             if [ "$(docker ps -a --format '{{.Names}}' | grep -c ${{ env.PREV_NAME }})" -gt 0 ]; then
               docker rm -f ${{ env.PREV_NAME }}
             fi
@@ -195,6 +232,7 @@ jobs:
             # docker container prune --force
         env:
           TARGET_PLATFORM: ${{ needs.deploy_target.outputs.platform }}
+          DEPLOYMENT_MODE: ${{ needs.deploy_target.outputs.mode }}
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
           ECR_TOKEN: ${{ steps.ecr-login-token.outputs.token }}
           IMAGE_URI: ${{ env.IMAGE_URI }}
@@ -213,7 +251,7 @@ jobs:
     # Prod only: a release tag (v3.13.13, v3.12.2-a), not a branch deploy.
     # The run itself is changelog-run.yml, shared with the manual
     # changelog.yml; the release-meta decides the scope (no scope input).
-    if: needs.action_trigger.result == 'success' && startsWith(needs.action_trigger.outputs.image_tag, 'v')
+    if: needs.action_trigger.result == 'success' && needs.action_trigger.outputs.deployment_mode != 'arm64-smoke' && startsWith(needs.action_trigger.outputs.image_tag, 'v')
     permissions:
       id-token: write   # OIDC sign-in to AWS, for the SSM settings
       contents: read
@@ -227,6 +265,7 @@ jobs:
 
   changelog-notify:
     needs: [action_trigger, changelog]
+    if: needs.action_trigger.outputs.deployment_mode != 'arm64-smoke'
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
@@ -278,7 +317,7 @@ jobs:
   # Housekeeping only: never fails the run.
   prune-images:
     needs: [action_trigger]
-    if: needs.action_trigger.result == 'success'
+    if: needs.action_trigger.result == 'success' && needs.action_trigger.outputs.deployment_mode != 'arm64-smoke'
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:

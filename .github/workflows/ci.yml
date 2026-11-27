@@ -213,9 +213,8 @@ jobs:
               if docker container inspect "$smoke_name" >/dev/null 2>&1; then
                 docker rm -f "$smoke_name" || exit 1
               fi
-              # Keep the smoke endpoint private to the new host.
               docker run --name "$smoke_name" -d \
-                -p "127.0.0.1:${{ env.OUT_PORT }}:${{ env.PORT }}" "${IMAGE_URI}"
+                -p "${{ env.OUT_PORT }}:${{ env.PORT }}" "${IMAGE_URI}"
               exit $?
             fi
 
